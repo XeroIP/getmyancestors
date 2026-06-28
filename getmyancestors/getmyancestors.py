@@ -13,6 +13,7 @@ import argparse
 # local imports
 from getmyancestors.classes.tree import Tree
 from getmyancestors.classes.session import Session
+from getmyancestors.classes.narrative import print_narrative
 
 
 
@@ -93,6 +94,13 @@ def main():
         metavar="<INT>",
         type=int,
         help="Max # requests per second",
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["gedcom", "markdown"],
+        default="gedcom",
+        help="Output format: gedcom (5.5.1) or markdown narrative [gedcom]",
     )
     parser.add_argument(
         "--show-password",
@@ -274,9 +282,12 @@ def main():
         loop.run_until_complete(download_stuff(loop))
 
     finally:
-        # compute number for family relationships and print GEDCOM file
+        # compute number for family relationships and print output
         tree.reset_num()
-        tree.print(args.outfile)
+        if args.format == "markdown":
+            print_narrative(tree, args.outfile)
+        else:
+            tree.print(args.outfile)
         print(
             _(
                 "Downloaded %s individuals, %s families, %s sources and %s notes "
