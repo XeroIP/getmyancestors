@@ -6,6 +6,19 @@ steps for that change. Recommended order: GUI removal first (pure deletion, no d
 then Python 2 cleanup, then packaging migration to uv, then the asyncio replacement, and
 finally the structural refactoring.
 
+**Cross-section dependencies.** The sections are mostly independent, but three couplings matter
+when you sequence the work:
+
+- **§5 D (bounded backoff) requires §5 C (composition)** — the rewritten `get_url` calls
+  `self._session.get(...)`, which only exists after the composition change. §5 D restates this as
+  an inline prerequisite.
+- **§4 (async → threads) and §5 B (I/O out of constructors) touch the same parallelism.** §4
+  preserves the fan-out via `ThreadPoolExecutor`; §5 B moves per-object fetches up to the `Tree`
+  layer, which serialises them unless you also run the pre-fetch through an executor. Do §4 first,
+  then apply §5 B's pre-fetch *through* the same executor pattern (see the note in §5 B).
+- **§4's `MAX_WORKERS` and the `requires-python = ">=3.10"` bump** are introduced in §4 and §3
+  respectively; neither blocks the other, but land §3's metadata change before tagging a release.
+
 ---
 
 ## 1. Remove the GUI (do this first — it's a clean deletion with no dependencies)
@@ -188,13 +201,14 @@ CLI use via installed entry points, so all of these are dead code.
 `print()` behave as a function so the same source could run on both 2 and 3. Python 3
 has only the function form; the import is a no-op and a misleading signal.
 
-**Where it appears (two files):**
+**Where it appears (two files, verified by grep):**
 
 - `getmyancestors/getmyancestors.py`, line 4
 - `getmyancestors/mergemyancestors.py`, line 3
 
-> Note: the task brief references a third file. A grep of the repository finds exactly
-> two occurrences. No action needed beyond the two files listed above.
+> `grep -rn "from __future__ import print_function" getmyancestors/` returns exactly these
+> two hits. (An earlier draft of this plan said "3 files" — that was inaccurate; the verified
+> count is two.)
 
 **What to do:** Delete the `from __future__ import print_function` line from each file.
 No other changes required — both files use `print()` as a function throughout and that
@@ -503,9 +517,9 @@ setuptools version happens to be installed.
 
 **`requires-python` raised to `>=3.10`.**
 The current `>=3.7` claim is inaccurate — the codebase uses `asyncio.get_event_loop()` patterns
-that emit `DeprecationWarning` on 3.10 and raise `RuntimeError` on 3.12, as covered in section 4.
-Setting this to `>=3.10` matches where the code runs correctly after those fixes land.
-(Python 3.9 reached end-of-life in October 2025.)
+that emit `DeprecationWarning` from 3.10 onward (with the no-running-loop behaviour slated for
+removal), as covered in section 4. Setting this to `>=3.10` matches where the code is intended to
+run after the async migration lands. (Python 3.9 reached end-of-life in October 2025.)
 
 **`diskcache==5.6.3` dropped.**
 `diskcache` is used exclusively by the GUI (`fstogedcom`). After removing the GUI in section 1,
@@ -647,7 +661,7 @@ The codebase uses `asyncio` in three places to parallelize HTTP-bound work. In e
 
 #### 2. `asyncio.get_event_loop()` is deprecated
 
-Python 3.10 deprecated `asyncio.get_event_loop()` when called with no running event loop, emitting a `DeprecationWarning` at runtime. Python 3.12 escalated this: if there is no current event loop, the call now raises `RuntimeError` instead of silently creating one. Because this code runs as a CLI (not inside an existing async framework), there is no running loop at the call sites, so any Python 3.12 installation will crash at this call site.
+Python 3.10 deprecated `asyncio.get_event_loop()` when called with no running event loop, emitting a `DeprecationWarning` at runtime. As of this writing it still returns (or lazily creates) a loop in the main thread, but the warning is live and the no-running-loop behaviour is scheduled for removal — at which point these call sites will raise `RuntimeError` instead of silently working. Because this code runs as a CLI (not inside an existing async framework), there is no running loop at the call sites, so every invocation already trips the deprecation path today and is on borrowed time. Treat it as broken-pending-removal rather than waiting for a hard failure.
 
 `add_indis` uses the slightly different `asyncio.new_event_loop()` + `asyncio.set_event_loop(loop)` pattern, which avoids the deprecation but creates a new loop for every invocation of `add_indis()` — once per call, before the batch `while` loop, not once per batch iteration. If an exception escapes before `loop.close()` is called (and it is never explicitly called here), the loop leaks.
 
@@ -883,10 +897,10 @@ from getmyancestors.classes.constants import MAX_WORKERS
 | Location | Old API | Problem | Replacement |
 |---|---|---|---|
 | `tree.py` `add_indis` | `asyncio.new_event_loop()` + `run_in_executor` | Resource leak, false async | `ThreadPoolExecutor` + `futures_wait` |
-| `tree.py` `add_spouses` | `asyncio.get_event_loop()` + `run_in_executor` | Deprecated (3.10), crashes (3.12) | `ThreadPoolExecutor` + `futures_wait` |
-| `getmyancestors.py` `download_stuff` | `asyncio.get_event_loop()` + `run_in_executor` | Deprecated (3.10), crashes (3.12) | `ThreadPoolExecutor` + `futures_wait` |
+| `tree.py` `add_spouses` | `asyncio.get_event_loop()` + `run_in_executor` | Deprecated 3.10+, removal-pending | `ThreadPoolExecutor` + `futures_wait` |
+| `getmyancestors.py` `download_stuff` | `asyncio.get_event_loop()` + `run_in_executor` | Deprecated 3.10+, removal-pending | `ThreadPoolExecutor` + `futures_wait` |
 
-The migration removes approximately 30 lines of asyncio boilerplate and replaces it with an equivalent number of lines that are simpler, standard, and correct under Python 3.12+.
+The migration removes approximately 30 lines of asyncio boilerplate and replaces it with an equivalent number of lines that are simpler, standard, and free of the deprecation.
 
 ---
 
@@ -1067,7 +1081,7 @@ for person in data["persons"]:
 
 Then pass `person_sources` into `add_data` (or into the constructor) so the method works entirely from already-fetched data.
 
-**Performance note:** The current `add_data` calls run concurrently via the thread executor. Moving the source fetches to a serial pre-fetch loop outside that executor will lose that concurrency for the source-fetch phase. If fetch latency is a concern, consider using `ThreadPoolExecutor` with `map` over the source fetches as well. The correctness benefit (no I/O inside constructors) is the priority here, but flag the tradeoff if runtime is already a pain point.
+**Performance note (and its interaction with §4):** The current `add_data` calls run concurrently via the thread executor. Moving the source fetches to a serial pre-fetch loop outside that executor would lose that concurrency for the source-fetch phase — and would partially undo §4, whose whole point is to keep this fan-out parallel. Do not pre-fetch serially. Apply §4 first, then run this pre-fetch through the *same* `ThreadPoolExecutor` (e.g. `executor.map(fetch_sources, person_ids)`) so the fetch phase stays parallel and the constructors stay I/O-free. The correctness goal (no I/O inside constructors) and the performance goal (parallel fetch) are both achievable; they only conflict if the pre-fetch is written serially.
 
 2. **Memories for individuals.** Same approach — collect all memory URLs from the `evidence` lists before construction, fetch them, and pass the results in:
 
@@ -1270,7 +1284,9 @@ def login(self):
     )
 ```
 
-4. Rewrite the `get_url` loop with the same structure. Distinguish between retriable failures (timeout, connection error, 5xx) and permanent failures (401 after re-login, 403, 404, 410) — the latter should return `None` or raise immediately rather than consuming retry budget:
+4. Rewrite the `get_url` loop with the same structure. Distinguish between three outcomes, not two: **retriable failures** (timeout, connection error, 5xx) consume the retry budget; **permanent failures** (403, 404, 410) return `None` immediately; and a **401** triggers a re-login that must *not* consume the request-retry budget — otherwise a token that expires on the final attempt is refreshed but the URL is never re-fetched.
+
+   The fix is a dedicated re-auth counter, separate from the request-retry counter. A 401 refreshes the token and re-issues the same URL without advancing `attempt`, bounded by its own small limit so a server that returns 401 unconditionally cannot loop forever:
 
 ```python
 def get_url(self, url, headers=None, no_api=False):
@@ -1280,17 +1296,18 @@ def get_url(self, url, headers=None, no_api=False):
     headers = {**headers, **self.headers}
     base = "https://familysearch.org" if no_api else "https://api.familysearch.org"
 
-    for attempt in range(self.max_retries):
+    MAX_REAUTH = 2          # token refreshes allowed per get_url call
+    reauth = 0
+    attempt = 0
+    while attempt < self.max_retries:
         try:
             self.write_log("Downloading: " + url)
             r = self._session.get(base + url, timeout=self.timeout, headers=headers)
-        except requests.exceptions.ReadTimeout:
-            self.write_log("Read timed out (attempt %d/%d)" % (attempt + 1, self.max_retries))
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError) as exc:
+            self.write_log("%s (attempt %d/%d)" % (type(exc).__name__, attempt + 1, self.max_retries))
             time.sleep(self._backoff(attempt))
-            continue
-        except requests.exceptions.ConnectionError:
-            self.write_log("Connection aborted (attempt %d/%d)" % (attempt + 1, self.max_retries))
-            time.sleep(self._backoff(attempt))
+            attempt += 1
             continue
 
         self.write_log("Status code: %s" % r.status_code)
@@ -1302,16 +1319,14 @@ def get_url(self, url, headers=None, no_api=False):
             self.write_log("WARNING: " + url)
             return None
         if r.status_code == 401:
-            self.login()   # login() now raises after max_retries
-            # Do NOT count this against the retry budget — the loop iteration
-            # consumed a slot for the 401 itself; re-issue the URL without
-            # decrementing by using a separate inner retry rather than continue.
-            # Simplest approach: don't use continue here; fall through to the
-            # r.raise_for_status() block, or restructure so 401 re-login retries
-            # the URL once without consuming the outer attempt count.
-            continue  # WARNING: if this is the last attempt, the URL is never
-                      # retried after a successful re-login. Consider a dedicated
-                      # reauth counter separate from the request retry budget.
+            if reauth >= MAX_REAUTH:
+                raise RuntimeError(
+                    "get_url: repeated 401 after %d re-logins: %s" % (reauth, url)
+                )
+            reauth += 1
+            self.login()        # login() raises after its own max_retries
+            headers = {**headers, **self.headers}   # pick up the refreshed Bearer token
+            continue            # retry the URL WITHOUT advancing `attempt`
         if r.status_code == 403:
             # ... existing 403 handling ...
             return None
@@ -1321,6 +1336,7 @@ def get_url(self, url, headers=None, no_api=False):
         except requests.exceptions.HTTPError:
             self.write_log("HTTPError %d (attempt %d/%d)" % (r.status_code, attempt + 1, self.max_retries))
             time.sleep(self._backoff(attempt))
+            attempt += 1
             continue
 
         try:
@@ -1333,6 +1349,8 @@ def get_url(self, url, headers=None, no_api=False):
         "get_url failed after %d attempts: %s" % (self.max_retries, url)
     )
 ```
+
+The loop is now an explicit `while attempt < self.max_retries` with manual `attempt += 1` on each *retriable* path, so the 401/re-auth path can `continue` without burning a request-retry slot. The `headers` dict is re-merged after `login()` so the new Bearer token (stored in `self.headers` per section C, step 4) is actually sent on the retry — re-logging-in without re-merging would resend the stale token and loop straight back to 401.
 
 5. Update the CLI entry point (`getmyancestors.py`) to catch `RuntimeError` from `Session.__init__` (which calls `login`) and print a user-friendly message before exiting, rather than letting the exception propagate as an unhandled traceback.
 
