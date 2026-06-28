@@ -1355,3 +1355,128 @@ The loop is now an explicit `while attempt < self.max_retries` with manual `atte
 5. Update the CLI entry point (`getmyancestors.py`) to catch `RuntimeError` from `Session.__init__` (which calls `login`) and print a user-friendly message before exiting, rather than letting the exception propagate as an unhandled traceback.
 
 6. Consider exposing `--max-retries` as a CLI flag so users with unreliable connections can increase the limit without editing source code.
+
+---
+
+## 6. Robustness for deep runs (resume cache + ascend-until-empty)
+
+This section is feature work, not cleanup — it targets the case where a user wants many
+generations (e.g. `-a 10` or deeper). Depth already works today via the `-a`/`-d` flags;
+the loop in `getmyancestors.py` (~line 217) iterates `range(args.ascend)` with no hard cap
+and already de-dupes via `todo - done`, so pedigree collapse cannot loop forever. What is
+missing is *robustness at depth*: a long run is slow, all-or-nothing, and (until §5 D lands)
+can hang. The three items below make deep runs practical.
+
+> **Sequencing:** Item A (bounded retries) is the highest-value prerequisite — it is already
+> specified as §5 D. Do §5 D first; without it a deep run can still hang indefinitely, which
+> no amount of caching fixes. Items B and C below are net-new and independent of each other.
+
+### A. Bound the retries first (cross-reference)
+
+The single most important change for deep runs is already documented: §5 D replaces the
+unbounded `while True:` retry loops in `Session.get_url`/`login` with bounded backoff. A
+12-generation run issues thousands of requests; with the current unbounded loop, one
+persistently-failing endpoint hangs the entire run with no output beyond what the `finally`
+block (`getmyancestors.py:276`) has already collected. Land §5 D before relying on deep runs.
+
+No additional work here — this item exists to flag the dependency.
+
+### B. Resume cache (skip already-fetched persons across runs)
+
+#### Problem
+
+There is no persistence between runs. Every invocation re-fetches every person from scratch.
+If a deep run is interrupted — network drop, rate-limit wall, `Ctrl+C`, or an exhausted retry
+budget after §5 D — the next attempt repeats all the work. For a run that takes many minutes
+and thousands of requests, that is the difference between "resume where I left off" and "start
+over."
+
+(Note: the GUI removal in §1 drops `diskcache`, which was the only on-disk cache in the
+project and was used solely for GUI language preference — not for tree data. So this is genuinely
+new persistence, not a reuse of the removed dependency.)
+
+#### Approach
+
+Add an **opt-in** disk cache keyed by FamilySearch person id, storing the raw GedcomX JSON
+returned for each person. The cache lives at the HTTP layer (`Session.get_url`) or just above
+it, so every consumer benefits without per-call-site changes.
+
+- **Storage:** a single SQLite file (stdlib `sqlite3`, no new dependency) or a directory of
+  JSON files keyed by id. SQLite is preferred — one file, atomic writes, easy to delete.
+- **Key:** the request URL (or the person/relationship id embedded in it). The URL is already
+  the natural cache key in `get_url`.
+- **Scope:** cache only **immutable-ish reads** — person data, couple-relationships, sources,
+  memories. Be cautious caching notes/contributors if you expect them to change between runs.
+- **Invalidation:** a `--refresh` flag bypasses and overwrites the cache; a `--cache-file PATH`
+  flag sets the location; default is no cache (current behaviour) unless `--cache` is passed.
+- **Wiring:** in `get_url`, check the cache before the HTTP call; on a successful `r.json()`,
+  write through to the cache before returning. This is ~15 lines around the existing fetch.
+
+```python
+# sketch — inside get_url, after computing the final URL
+if self.cache is not None:
+    cached = self.cache.get(url)
+    if cached is not None:
+        self.write_log("CACHE HIT: " + url)
+        return cached
+# ... existing fetch ...
+result = r.json()
+if self.cache is not None:
+    self.cache.set(url, result)
+return result
+```
+
+#### Caveats
+
+- **Staleness:** cached data can drift from FamilySearch. The `--refresh` escape hatch and a
+  documented "delete the cache file to force a clean pull" are the mitigations. Do not cache
+  silently-by-default — make the user opt in so they are never surprised by stale output.
+- **Counter interaction:** the cache stores raw API JSON, *not* model objects. Models (and their
+  GEDCOM ids) are still rebuilt fresh each run, so this does not interact with the id-allocator
+  work in §5 A.
+
+### C. "Ascend until exhausted" mode
+
+#### Problem
+
+`-a N` requires guessing a depth. Too low and you miss ancestors; too high and you waste
+requests on generations that return nothing. There is no "just follow every line as far as the
+data goes" option.
+
+#### Approach
+
+Treat `-a 0` (or a dedicated `--ascend-all` flag) as "keep ascending until a generation adds no
+new individuals." The existing loop already exposes exactly the signal needed — it computes
+`todo = tree.add_parents(todo) - done` each iteration and breaks when `todo` is empty:
+
+```python
+# Before — fixed count
+for i in range(args.ascend):
+    if not todo:
+        break
+    done |= todo
+    todo = tree.add_parents(todo) - done
+
+# After — 0 means "until exhausted"
+generation = 0
+while todo and (args.ascend == 0 or generation < args.ascend):
+    done |= todo
+    generation += 1
+    print(_("Downloading generation %s of ancestors...") % generation, file=sys.stderr)
+    todo = tree.add_parents(todo) - done
+```
+
+The `not todo` break already terminates naturally when a tree runs out of recorded ancestors —
+this change just removes the fixed ceiling when the user asks for it. Apply the same pattern to
+the descend loop (`-d 0` → descend until exhausted) for symmetry.
+
+#### Caveats
+
+- **Runaway scope:** a well-connected tree with deep records could pull a very large number of
+  people. "Exhausted" is bounded by the data, but the data can be big. Pair this with the resume
+  cache (item B) and bounded retries (§5 D / item A) so a large `--ascend-all` run is restartable
+  and cannot hang.
+- **Backwards compatibility:** `-a 0` currently means "ascend zero generations" (the loop body
+  never runs). Repurposing `0` changes that meaning. If preserving the old behaviour matters, use
+  a separate `--ascend-all` flag instead of overloading `0` — recommended, to avoid a silent
+  semantic change.
