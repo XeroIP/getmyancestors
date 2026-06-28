@@ -456,7 +456,7 @@ fstogedcom = "getmyancestors.fstogedcom:main"
 ```toml
 [build-system]
 requires = ["setuptools>=70"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "getmyancestors"
@@ -863,7 +863,7 @@ import asyncio  # DELETE
 import asyncio  # DELETE
 ```
 
-Add `MAX_WORKERS` to `getmyancestors/classes/constants.py` alongside `MAX_PERSONS` — that is already the established home for tuning constants, and both files import from it:
+Add `MAX_WORKERS` to `getmyancestors/classes/constants.py` alongside `MAX_PERSONS` — that is already the established home for tuning constants, and `tree.py` already imports from it. `getmyancestors.py` does not currently import from `constants.py`, so the import below is a net-new line in that file:
 
 ```python
 # getmyancestors/classes/constants.py
@@ -976,7 +976,20 @@ class Indi:
             raise ValueError("Indi requires either num= or tree=")
 ```
 
-Note the guard change from `if num:` to `if num is not None:`. The original code uses a truthiness check, so `num=0` is silently ignored and a new id is allocated instead — a latent bug for any GEDCOM that uses index 0. The identity check closes that hole. Apply this same correction when updating `Fam`.
+Note the guard change from `if num:` to `if num is not None:`. The original code uses a truthiness check, so `num=0` is silently ignored and a new id is allocated instead — a latent bug for any GEDCOM that uses index 0. The identity check closes that hole.
+
+Apply the same pattern to `Fam` — it has the identical constructor shape and the same truthiness-zero bug:
+
+```python
+class Fam:
+    def __init__(self, father=None, mother=None, tree=None, num=None):
+        if num is not None:
+            self.num = num
+        elif tree:
+            self.num = tree.next_fam_id()
+        else:
+            raise ValueError("Fam requires either num= or tree=")
+```
 
 Apply the same `if num is not None` / `elif tree` structure to `Note` and `Source`, but do **not** add the `raise ValueError` fallback for those two classes. Both have valid standalone uses: a `Note` can be created without a tree and appended later, and `Source` similarly. Raising unconditionally when tree is absent would break any caller that constructs them standalone. Before adding a ValueError to `Note` or `Source`, grep all callers (including any scripts outside this repo that import the package) to confirm none create them without a tree argument.
 
@@ -1134,7 +1147,8 @@ class Session:
     def __init__(self, username, password, ...):
         self._session = requests.Session()
         self.headers = {"User-Agent": UserAgent().firefox}
-        self._session.headers.update(self.headers)
+        # Do NOT call self._session.headers.update(self.headers) here —
+        # keep self.headers as the sole canonical header store (see step 4).
 ```
 
 2. Replace every direct call to the inherited parent methods with delegation through `self._session`:
@@ -1160,6 +1174,10 @@ class Session:
 5. Callers outside `session.py` access `Session` through a larger surface than just `get_url`, `login`, and `logged`. They also read `fs._` (the translation method), `fs.fid`, `fs.lang`, `fs.display_name`, and `fs.counter` directly. Every one of these is an attribute on the outer `Session` instance, not on `requests.Session`, so none of them move when you introduce composition — they stay exactly where callers expect them. The only things being replaced are the inherited `requests.Session` methods (`.get`, `.post`, `.cookies`, `.mount`). This change is contained in the sense that no caller signatures need updating, but do not let the audit stop at the three methods named above — verify that `fs._`, `fs.fid`, and the other instance attributes remain on the outer object after refactoring.
 
 ### D. Unbounded retry loops → bounded backoff
+
+> **Prerequisite:** The proposed `get_url` replacement below uses `self._session.get(...)`.
+> Apply section C (composition over inheritance) before applying this section, or replace
+> `self._session.get(...)` with `self.get(...)` if you are applying this section independently.
 
 #### Problem
 
