@@ -43,3 +43,7 @@ Three console scripts are declared in `pyproject.toml`: `getmyancestors` and `me
 ## i18n
 
 Translations are a hand-rolled dict in `classes/translation.py`, looked up by `Session._()` (and a duplicate `_()` helper in the GUI). The user's language comes from FamilySearch via `Session.set_current()`.
+
+## Blog articles on merge
+
+When a pull request is merged into `master`, write a blog-post-style article to `blog/YYYY-MM-DD-<slug>.md` describing **what changed and why**, with some real technical detail — the problem it solved, the approach taken, and any notable implementation choices or trade-offs. Write narrative prose for a developer audience, not a bare changelog. Link the merged PR, and lead with motivation before mechanics. One article per merged PR (the first article, `blog/2026-06-28-modernizing-getmyancestors.md`, is the exception — it covers everything since the fork). True automation on the GitHub merge event would require a GitHub Action; absent that, this is a convention for whoever (or whatever) lands the merge.
