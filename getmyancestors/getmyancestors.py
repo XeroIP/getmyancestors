@@ -247,7 +247,7 @@ def main():
                 break
             done |= todo
             print(
-                _("Downloading %s. of generations of ancestors...") % (i + 1),
+                _("Downloading generation %s of ancestors...") % (i + 1),
                 file=sys.stderr,
             )
             todo = tree.add_parents(todo) - done
@@ -260,7 +260,7 @@ def main():
                 break
             done |= todo
             print(
-                _("Downloading %s. of generations of descendants...") % (i + 1),
+                _("Downloading generation %s of descendants...") % (i + 1),
                 file=sys.stderr,
             )
             todo = tree.add_children(todo) - done
