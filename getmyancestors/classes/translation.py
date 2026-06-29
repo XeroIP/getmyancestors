@@ -100,7 +100,7 @@ translations = {
     "Downloading starting individuals...": {
         "fr": "Téléchargement des personnes de départ..."
     },
-    "Downloading %s. of generations of descendants...": {
+    "Downloading generation %s of descendants...": {
         "fr": "Téléchargement de %s génération(s) de descendants..."
     },
     "Downloading spouses and marriage information...": {
@@ -153,7 +153,7 @@ translations = {
         "fr": "Le nom d'utilisateur ou le mot de passe est incorrect"
     },
     "Options": {"fr": "Options"},
-    "Downloading %s. of generations of ancestors...": {
+    "Downloading generation %s of ancestors...": {
         "fr": "Téléchargement de %s génération(s) d'ancêtres..."
     },
     "Save": {"fr": "Sauvegarder"},

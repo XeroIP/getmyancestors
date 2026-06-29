@@ -13,6 +13,27 @@ import argparse
 # local imports
 from getmyancestors.classes.tree import Tree
 from getmyancestors.classes.session import Session
+from getmyancestors.classes.narrative import print_narrative
+
+
+def render_progress(desc, done, total):
+    """Draw an in-place progress bar on stderr.
+
+    No-op when stderr is not a terminal (so redirected logs stay clean) or
+    when there is nothing to do. Caller is responsible for skipping this in
+    verbose mode, where the per-request trace already shows progress.
+    """
+    if total <= 0 or not sys.stderr.isatty():
+        return
+    bar_len = 30
+    filled = int(bar_len * done / total)
+    bar = "#" * filled + "-" * (bar_len - filled)
+    sys.stderr.write(
+        "\r%s [%s] %d/%d (%d%%)" % (desc, bar, done, total, done * 100 // total)
+    )
+    sys.stderr.flush()
+    if done == total:
+        sys.stderr.write("\n")
 
 
 
@@ -93,6 +114,13 @@ def main():
         metavar="<INT>",
         type=int,
         help="Max # requests per second",
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["gedcom", "markdown"],
+        default="gedcom",
+        help="Output format: gedcom (5.5.1) or markdown narrative [gedcom]",
     )
     parser.add_argument(
         "--show-password",
@@ -219,7 +247,7 @@ def main():
                 break
             done |= todo
             print(
-                _("Downloading %s. of generations of ancestors...") % (i + 1),
+                _("Downloading generation %s of ancestors...") % (i + 1),
                 file=sys.stderr,
             )
             todo = tree.add_parents(todo) - done
@@ -232,7 +260,7 @@ def main():
                 break
             done |= todo
             print(
-                _("Downloading %s. of generations of descendants...") % (i + 1),
+                _("Downloading generation %s of descendants...") % (i + 1),
                 file=sys.stderr,
             )
             todo = tree.add_children(todo) - done
@@ -248,6 +276,7 @@ def main():
             futures = set()
             for fid, indi in tree.indi.items():
                 futures.add(loop.run_in_executor(None, indi.get_notes))
+                futures.add(loop.run_in_executor(None, indi.get_memories))
                 if args.get_ordinances:
                     futures.add(loop.run_in_executor(None, tree.add_ordinances, fid))
                 if args.get_contributors:
@@ -256,8 +285,13 @@ def main():
                 futures.add(loop.run_in_executor(None, fam.get_notes))
                 if args.get_contributors:
                     futures.add(loop.run_in_executor(None, fam.get_contributors))
-            for future in futures:
+            total = len(futures)
+            done = 0
+            for future in asyncio.as_completed(futures):
                 await future
+                done += 1
+                if not args.verbose:
+                    render_progress(_("Downloading notes & memories"), done, total)
 
         loop = asyncio.get_event_loop()
         print(
@@ -274,9 +308,12 @@ def main():
         loop.run_until_complete(download_stuff(loop))
 
     finally:
-        # compute number for family relationships and print GEDCOM file
+        # compute number for family relationships and print output
         tree.reset_num()
-        tree.print(args.outfile)
+        if args.format == "markdown":
+            print_narrative(tree, args.outfile)
+        else:
+            tree.print(args.outfile)
         print(
             _(
                 "Downloaded %s individuals, %s families, %s sources and %s notes "
