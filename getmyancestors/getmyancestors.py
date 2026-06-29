@@ -256,6 +256,7 @@ def main():
             futures = set()
             for fid, indi in tree.indi.items():
                 futures.add(loop.run_in_executor(None, indi.get_notes))
+                futures.add(loop.run_in_executor(None, indi.get_memories))
                 if args.get_ordinances:
                     futures.add(loop.run_in_executor(None, tree.add_ordinances, fid))
                 if args.get_contributors:

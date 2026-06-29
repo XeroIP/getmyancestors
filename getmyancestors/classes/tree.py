@@ -368,22 +368,6 @@ class Indi:
                         self.sources.add(
                             (self.tree.sources[source["id"]], quotes[source["id"]])
                         )
-            for evidence in data.get("evidence", []):
-                memory_id, *_ = evidence["id"].partition("-")
-                url = "/platform/memories/memories/%s" % memory_id
-                memorie = self.tree.fs.get_url(url)
-                if memorie and "sourceDescriptions" in memorie:
-                    for x in memorie["sourceDescriptions"]:
-                        if x["mediaType"] == "text/plain":
-                            text = "\n".join(
-                                val.get("value", "")
-                                for val in x.get("titles", [])
-                                + x.get("descriptions", [])
-                            )
-                            self.notes.add(Note(text, self.tree))
-                        else:
-                            self.memories.add(Memorie(x))
-
     def add_fams(self, fams):
         """add family fid (for spouse or parent)"""
         self.fams_fid.add(fams)
@@ -400,6 +384,44 @@ class Indi:
                 text_note = "=== %s ===\n" % n["subject"] if "subject" in n else ""
                 text_note += n["text"] + "\n" if "text" in n else ""
                 self.notes.add(Note(text_note, self.tree))
+
+    def get_memories(self):
+        """retrieve every memory (artifact) attached to the individual.
+
+        Uses the paged /persons/<id>/memories endpoint and follows pagination,
+        so memories that are not linked as evidence -- and any beyond the first
+        page of 25 -- are not missed. text/plain artifacts become notes (life
+        stories); everything else becomes a media object.
+        """
+        start = 0
+        count = 25
+        seen = set()
+        while True:
+            url = "/platform/tree/persons/%s/memories?start=%s&count=%s" % (
+                self.fid,
+                start,
+                count,
+            )
+            data = self.tree.fs.get_url(url)
+            if not data or "sourceDescriptions" not in data:
+                break
+            descriptions = data["sourceDescriptions"]
+            for x in descriptions:
+                key = x.get("about") or x.get("id")
+                if key in seen:
+                    continue
+                seen.add(key)
+                if x.get("mediaType") == "text/plain":
+                    text = "\n".join(
+                        val.get("value", "")
+                        for val in x.get("titles", []) + x.get("descriptions", [])
+                    )
+                    self.notes.add(Note(text, self.tree))
+                else:
+                    self.memories.add(Memorie(x))
+            if len(descriptions) < count:
+                break
+            start += count
 
     def get_ordinances(self):
         """retrieve LDS ordinances
