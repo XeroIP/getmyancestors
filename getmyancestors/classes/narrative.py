@@ -68,11 +68,28 @@ def _find_fact(indi, type_uri):
     return None
 
 
+MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+          "August", "September", "October", "November", "December")
+
+
+def _pretty_date(date_str):
+    """Turn a formal YYYYMMDD / +YYYY-MM-DD date into '11 August 1980'.
+    Leaves already-readable dates (and year-only values) untouched."""
+    if not date_str:
+        return date_str
+    match = re.fullmatch(r"\+?(\d{4})-?(\d{2})-?(\d{2})", date_str.strip())
+    if match:
+        year, month, day = match.group(1), int(match.group(2)), int(match.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return "%d %s %s" % (day, MONTHS[month - 1], year)
+    return date_str
+
+
 def _when_where(fact):
     """Format a fact's date/place as 'DATE in PLACE' (either part optional)."""
     parts = []
     if fact.date:
-        parts.append(fact.date)
+        parts.append(_pretty_date(fact.date))
     if fact.place:
         parts.append("in " + fact.place)
     return " ".join(parts)
@@ -138,12 +155,15 @@ def _write_person(tree, indi, file):
             detail = (detail + " — " + fact.value) if detail else fact.value
         file.write("- **%s:** %s\n" % (label, detail or ""))
 
-    # Parents
+    # Parents (dedupe — a person can have several parent-relationship records
+    # that share a parent)
     parent_links = []
+    seen_parents = set()
     for father_fid, mother_fid in indi.famc_fid:
         for pfid in (father_fid, mother_fid):
-            if not pfid:
+            if not pfid or pfid in seen_parents:
                 continue
+            seen_parents.add(pfid)
             link = _link(tree, pfid)
             parent_links.append(link if link else "Unknown (not downloaded)")
     if parent_links:
